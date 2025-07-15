@@ -1,0 +1,225 @@
+name: AppWright Test
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+env:
+  ORG_ID: qualgent
+  APP_VERSION_ID: ${{ github.sha }}
+
+jobs:
+  run-tests:
+    runs-on: ubuntu-latest
+    
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+        cache: 'npm'
+
+    - name: Install dependencies
+      run: npm ci
+
+    - name: Start job server
+      run: |
+        npm start &
+        echo $! > server.pid
+        # Wait for server to be ready
+        for i in {1..30}; do
+          if curl -f http://localhost:3000/api/health > /dev/null 2>&1; then
+            echo "Server is ready"
+            break
+          fi
+          echo "Waiting for server... ($i/30)"
+          sleep 2
+        done
+      env:
+        NODE_ENV: test
+        REDIS_URL: redis://localhost:6379
+
+    - name: Verify server health
+      run: |
+        curl -f http://localhost:3000/api/health
+        curl -f http://localhost:3000/api/health/detailed
+
+    - name: Submit test jobs
+      id: submit-jobs
+      run: |
+        # Submit multiple test jobs to demonstrate grouping
+        echo "Submitting test jobs..."
+        
+        # Test 1: Onboarding test
+        JOB1=$(node src/cli/index.js submit \
+          --org-id=$ORG_ID \
+          --app-version-id=$APP_VERSION_ID \
+          --test=examples/appwright-tests/onboarding.spec.js \
+          --priority=high \
+          --target=emulator | grep "Job ID:" | cut -d' ' -f3)
+        echo "job1=$JOB1" >> $GITHUB_OUTPUT
+        
+        # Test 2: Login test (same app version - should be grouped)
+        JOB2=$(node src/cli/index.js submit \
+          --org-id=$ORG_ID \
+          --app-version-id=$APP_VERSION_ID \
+          --test=examples/appwright-tests/login.spec.js \
+          --priority=medium \
+          --target=emulator | grep "Job ID:" | cut -d' ' -f3)
+        echo "job2=$JOB2" >> $GITHUB_OUTPUT
+        
+        # Test 3: Checkout test (same app version - should be grouped)
+        JOB3=$(node src/cli/index.js submit \
+          --org-id=$ORG_ID \
+          --app-version-id=$APP_VERSION_ID \
+          --test=examples/appwright-tests/checkout.spec.js \
+          --priority=medium \
+          --target=device | grep "Job ID:" | cut -d' ' -f3)
+        echo "job3=$JOB3" >> $GITHUB_OUTPUT
+        
+        echo "Submitted jobs: $JOB1, $JOB2, $JOB3"
+
+    - name: Register test agent
+      run: |
+        # Start a test agent to process the jobs
+        node scripts/test-agent.js &
+        echo $! > agent.pid
+        sleep 5
+
+    - name: Wait for job completion
+      run: |
+        echo "Waiting for jobs to complete..."
+        
+        # Wait for each job with timeout
+        timeout 300 node src/cli/index.js wait --job-id=${{ steps.submit-jobs.outputs.job1 }} --timeout=120 || echo "Job 1 timeout"
+        timeout 300 node src/cli/index.js wait --job-id=${{ steps.submit-jobs.outputs.job2 }} --timeout=120 || echo "Job 2 timeout"
+        timeout 300 node src/cli/index.js wait --job-id=${{ steps.submit-jobs.outputs.job3 }} --timeout=120 || echo "Job 3 timeout"
+
+    - name: Check job results
+      run: |
+        echo "Checking job results..."
+        
+        # Check status of all jobs
+        echo "=== Job 1 Status ==="
+        node src/cli/index.js status --job-id=${{ steps.submit-jobs.outputs.job1 }}
+        
+        echo "=== Job 2 Status ==="
+        node src/cli/index.js status --job-id=${{ steps.submit-jobs.outputs.job2 }}
+        
+        echo "=== Job 3 Status ==="
+        node src/cli/index.js status --job-id=${{ steps.submit-jobs.outputs.job3 }}
+        
+        # Get job details via API to check results
+        JOB1_STATUS=$(curl -s http://localhost:3000/api/jobs/${{ steps.submit-jobs.outputs.job1 }} | jq -r '.status')
+        JOB2_STATUS=$(curl -s http://localhost:3000/api/jobs/${{ steps.submit-jobs.outputs.job2 }} | jq -r '.status')
+        JOB3_STATUS=$(curl -s http://localhost:3000/api/jobs/${{ steps.submit-jobs.outputs.job3 }} | jq -r '.status')
+        
+        echo "Final job statuses: $JOB1_STATUS, $JOB2_STATUS, $JOB3_STATUS"
+        
+        # Fail the build if any job failed
+        if [[ "$JOB1_STATUS" == "failed" || "$JOB2_STATUS" == "failed" || "$JOB3_STATUS" == "failed" ]]; then
+          echo "One or more jobs failed!"
+          exit 1
+        fi
+        
+        if [[ "$JOB1_STATUS" != "completed" || "$JOB2_STATUS" != "completed" || "$JOB3_STATUS" != "completed" ]]; then
+          echo "Not all jobs completed successfully!"
+          exit 1
+        fi
+        
+        echo "All jobs completed successfully!"
+
+    - name: Display queue status
+      if: always()
+      run: |
+        echo "=== Final Queue Status ==="
+        curl -s http://localhost:3000/api/jobs/queue/status | jq '.'
+
+    - name: Display agent status
+      if: always()
+      run: |
+        echo "=== Agent Status ==="
+        curl -s http://localhost:3000/api/agents | jq '.'
+
+    - name: Cleanup
+      if: always()
+      run: |
+        # Stop processes
+        if [ -f server.pid ]; then
+          kill $(cat server.pid) || true
+        fi
+        if [ -f agent.pid ]; then
+          kill $(cat agent.pid) || true
+        fi
+
+  # Separate job for integration testing
+  integration-test:
+    runs-on: ubuntu-latest
+    needs: run-tests
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Setup Docker Compose
+      run: |
+        # Install docker-compose if not available
+        if ! command -v docker-compose &> /dev/null; then
+          sudo curl -L "https://github.com/docker/compose/releases/download/v2.23.0/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+          sudo chmod +x /usr/local/bin/docker-compose
+        fi
+        docker-compose version
+
+    - name: Test Docker Compose setup
+      run: |
+        # Test the full Docker Compose setup
+        docker-compose up -d
+        
+        # Wait for services to be ready
+        sleep 60
+        
+        # Check container status
+        docker-compose ps
+        
+        # Show logs if job-server is unhealthy
+        echo "=== Job Server Logs ==="
+        docker-compose logs job-server
+        
+        echo "=== Redis Logs ==="
+        docker-compose logs redis
+        
+        # Test health endpoints
+        curl -f http://localhost:3000/api/health
+        
+        # Submit a test job using docker exec instead of docker-compose exec
+        docker exec $(docker-compose ps -q job-server) node src/cli/index.js submit \
+          --org-id=qualgent \
+          --app-version-id=docker-test \
+          --test=examples/appwright-tests/integration.spec.js \
+          --wait \
+          --timeout=60
+
+    - name: Cleanup Docker
+      if: always()
+      run: |
+        docker-compose down -v || docker compose down -v || true
