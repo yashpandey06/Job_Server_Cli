@@ -113,9 +113,9 @@ async function startServer() {
     await initializeRedis();
     logger.info('Redis connection established');
 
-    // Start job processor (disabled - using agent polling instead)
-    // startJobProcessor();
-    // logger.info('Job processor started');
+    // Start job processor
+    startJobProcessor();
+    logger.info('Job processor started');
 
     // Start HTTP server
     app.listen(PORT, () => {

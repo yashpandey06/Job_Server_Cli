@@ -1,5 +1,6 @@
 const winston = require('winston');
 const { Queue, JobStore, AgentStore } = require('./redis');
+const BrowserStackExecutor = require('./browserStackExecutor');
 
 const logger = winston.createLogger({
   level: 'info',
@@ -15,6 +16,7 @@ class JobProcessor {
     this.isRunning = false;
     this.processingInterval = null;
     this.groupingMap = new Map(); // Track jobs by app_version_id
+    this.browserStackExecutor = new BrowserStackExecutor();
   }
 
   /**
@@ -246,8 +248,8 @@ class JobProcessor {
         appVersionId: job.app_version_id
       });
 
-      // Simulate job execution
-      this.simulateJobExecution(job, agent);
+      // Execute job (real execution instead of simulation)
+      this.executeJob(job, agent);
 
     } catch (error) {
       logger.error('Error assigning job to agent:', error);
@@ -258,105 +260,110 @@ class JobProcessor {
   }
 
   /**
-   * Simulate job execution (in real implementation, this would communicate with actual agents)
+   * Execute job using real BrowserStack integration
    */
-  async simulateJobExecution(job, agent) {
-    const executionTime = Math.random() * 30000 + 10000; // 10-40 seconds
-    
-    setTimeout(async () => {
-      try {
-        // Simulate random success/failure
-        const success = Math.random() > 0.1; // 90% success rate
+  async executeJob(job, agent) {
+    try {
+      logger.info(`🚀 Executing job ${job.id} on agent ${agent.id}`);
+      
+      // Use BrowserStack executor for real test execution
+      const result = await this.browserStackExecutor.executeJob(job, agent);
+      
+      if (result.status === 'passed') {
+        await JobStore.updateJobStatus(job.id, 'completed', {
+          result: result
+        });
+        logger.info(`✅ Job ${job.id} completed successfully`);
+      } else {
+        // Handle failure with retry logic
+        const currentRetries = job.retry_count || 0;
+        const maxRetries = 3;
         
-        if (success) {
-          await JobStore.updateJobStatus(job.id, 'completed', {
-            result: {
-              status: 'passed',
-              test_results: {
-                total: 10,
-                passed: 10,
-                failed: 0,
-                duration: executionTime
-              }
-            }
+        if (currentRetries < maxRetries) {
+          // Retry the job
+          await JobStore.updateJobStatus(job.id, 'retrying', {
+            retry_count: currentRetries + 1,
+            last_error: result.error || 'Test execution failed',
+            retry_at: new Date(Date.now() + 30000).toISOString() // Retry after 30 seconds
+          });
+          
+          logger.info(`🔄 Job failed, retrying: ${job.id} (attempt ${currentRetries + 1}/${maxRetries})`);
+          
+          // Re-queue the job for retry
+          const queueName = `jobs:${job.priority}`;
+          await Queue.addJob(queueName, {
+            ...job,
+            retry_count: currentRetries + 1,
+            status: 'pending'
           });
         } else {
-          // Handle failure with retry logic
-          const currentRetries = job.retry_count || 0;
-          const maxRetries = 3;
-          
-          if (currentRetries < maxRetries) {
-            // Retry the job
-            const updatedJob = await JobStore.updateJobStatus(job.id, 'retrying', {
-              retry_count: currentRetries + 1,
-              last_error: 'Test execution failed: Assertion error in test case',
-              retry_at: new Date(Date.now() + 5000).toISOString() // Retry after 5 seconds
-            });
-            
-            logger.info(`Job failed, retrying: ${job.id} (attempt ${currentRetries + 1}/${maxRetries})`);
-            
-            // Re-queue the job for retry
-            const queueName = `jobs:${job.priority}`;
-            await Queue.addJob(queueName, {
-              ...job,
-              retry_count: currentRetries + 1,
-              status: 'pending'
-            });
-          } else {
-            // Max retries reached, mark as failed
-            await JobStore.updateJobStatus(job.id, 'failed', {
-              error: 'Test execution failed after maximum retries',
-              retry_count: currentRetries,
-              max_retries_reached: true
-            });
-            logger.error(`Job failed after ${maxRetries} retries: ${job.id}`);
-          }
+          // Max retries reached, mark as failed
+          await JobStore.updateJobStatus(job.id, 'failed', {
+            error: result.error || 'Test execution failed after maximum retries',
+            retry_count: currentRetries,
+            max_retries_reached: true,
+            result: result
+          });
+          logger.error(`❌ Job failed after ${maxRetries} retries: ${job.id}`);
         }
+      }
 
-        // Check if there are more jobs in the group
-        const groupKey = `${agent.id}:${job.app_version_id}`;
-        const group = this.groupingMap.get(groupKey);
+      // Check if there are more jobs in the group
+      const groupKey = `${agent.id}:${job.app_version_id}`;
+      const group = this.groupingMap.get(groupKey);
+      
+      if (group && group.jobs.length > 1) {
+        // Remove completed job from group
+        group.jobs = group.jobs.filter(j => j.id !== job.id);
         
-        if (group && group.jobs.length > 1) {
-          // Remove completed job from group
-          group.jobs = group.jobs.filter(j => j.id !== job.id);
+        if (group.jobs.length > 0) {
+          // Process next job in group
+          const nextJob = group.jobs[0];
+          await JobStore.updateJobStatus(nextJob.id, 'running', {
+            agent_id: agent.id,
+            assigned_at: new Date().toISOString()
+          });
           
-          if (group.jobs.length > 0) {
-            // Process next job in group
-            const nextJob = group.jobs[0];
-            await JobStore.updateJobStatus(nextJob.id, 'running', {
-              agent_id: agent.id,
-              assigned_at: new Date().toISOString()
-            });
-            
-            logger.info(`Processing next job in group:`, { 
-              jobId: nextJob.id, 
-              groupKey 
-            });
-            
-            // Continue simulation for next job
-            this.simulateJobExecution(nextJob, agent);
-            return;
-          }
+          logger.info(`⏭️  Processing next job in group:`, { 
+            jobId: nextJob.id, 
+            groupKey 
+          });
+          
+          // Execute next job
+          this.executeJob(nextJob, agent);
+        } else {
+          // Group completed, free agent
+          await AgentStore.updateAgentStatus(agent.id, 'idle');
+          this.groupingMap.delete(groupKey);
+          logger.info(`🏁 Job group completed: ${groupKey}`);
         }
-
-        // No more jobs in group, free up agent
-        await AgentStore.updateAgentStatus(agent.id, 'idle', null);
-        
-        // Clean up group
+      } else {
+        // Single job completed, free agent
+        await AgentStore.updateAgentStatus(agent.id, 'idle');
         if (group) {
           this.groupingMap.delete(groupKey);
-          logger.info(`Group completed and cleaned up:`, groupKey);
         }
-
-      } catch (error) {
-        logger.error('Error in job execution simulation:', error);
-        await JobStore.updateJobStatus(job.id, 'failed', {
-          error: 'Internal execution error'
-        });
-        await AgentStore.updateAgentStatus(agent.id, 'idle', null);
+        logger.info(`🏁 Job completed, agent freed: ${agent.id}`);
       }
-    }, executionTime);
+
+    } catch (error) {
+      logger.error(`💥 Error executing job ${job.id}:`, error);
+      
+      // Mark job as failed
+      await JobStore.updateJobStatus(job.id, 'failed', {
+        error: error.message,
+        execution_error: true
+      });
+      
+      // Free the agent
+      await AgentStore.updateAgentStatus(agent.id, 'idle');
+      
+      // Clean up group
+      const groupKey = `${agent.id}:${job.app_version_id}`;
+      if (this.groupingMap.has(groupKey)) {
+        this.groupingMap.delete(groupKey);
+      }
+    }
   }
 
   /**
