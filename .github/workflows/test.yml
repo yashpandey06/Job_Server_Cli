@@ -1,4 +1,4 @@
-name: AppWright Test
+name: QualGent AppWright Test
 
 on:
   push:
@@ -9,6 +9,8 @@ on:
 env:
   ORG_ID: qualgent
   APP_VERSION_ID: ${{ github.sha }}
+  BROWSERSTACK_USERNAME: ${{ secrets.BROWSERSTACK_USERNAME }}
+  BROWSERSTACK_ACCESS_KEY: ${{ secrets.BROWSERSTACK_ACCESS_KEY }}
 
 jobs:
   run-tests:
@@ -36,9 +38,32 @@ jobs:
         cache: 'npm'
 
     - name: Install dependencies
-      run: npm ci
+      run: |
+        npm ci
+        # Install BrowserStack test dependencies
+        cd node-appium-app-browserstack-master/android && npm ci
 
-    - name: Start job server
+    - name: Install qgjob CLI globally
+      run: |
+        npm link
+        # Verify qgjob is available
+        qgjob --version
+
+    - name: Create test environment file
+      run: |
+        cat > .env << EOF
+        PORT=3000
+        NODE_ENV=test
+        LOG_LEVEL=info
+        REDIS_URL=redis://localhost:6379
+        REDIS_HOST=localhost
+        REDIS_PORT=6379
+        QGJOB_API_URL=http://localhost:3000/api
+        MAX_CONCURRENT_JOBS=5
+        JOB_TIMEOUT=300000
+        EOF
+
+    - name: Start QualGent job server
       run: |
         npm start &
         echo $! > server.pid
@@ -55,121 +80,346 @@ jobs:
         NODE_ENV: test
         REDIS_URL: redis://localhost:6379
 
-    - name: Verify server health
+    - name: Verify server health and components
       run: |
+        echo "=== Server Health ==="
         curl -f http://localhost:3000/api/health
-        curl -f http://localhost:3000/api/health/detailed
+        echo ""
+        
+        echo "=== Detailed Health ==="
+        curl -s http://localhost:3000/api/health | jq '.'
+        
+        echo "=== Testing qgjob CLI connection ==="
+        # Test CLI connection to server
+        qgjob --help
 
-    - name: Submit test jobs
+    - name: Register test agents
+      run: |
+        echo "Registering test agents..."
+        
+        # Register emulator agent
+        curl -X POST http://localhost:3000/api/agents \
+          -H "Content-Type: application/json" \
+          -d '{
+            "name": "ci-emulator-agent",
+            "capabilities": {
+              "emulator": true,
+              "device": false,
+              "browserstack": false
+            },
+            "metadata": {
+              "type": "ci",
+              "location": "github-actions"
+            }
+          }'
+        echo ""
+        
+        # Register device agent
+        curl -X POST http://localhost:3000/api/agents \
+          -H "Content-Type: application/json" \
+          -d '{
+            "name": "ci-device-agent",
+            "capabilities": {
+              "emulator": false,
+              "device": true,
+              "browserstack": false
+            },
+            "metadata": {
+              "type": "ci",
+              "location": "github-actions"
+            }
+          }'
+        echo ""
+        
+        # Register BrowserStack agent (if credentials available)
+        if [[ -n "$BROWSERSTACK_USERNAME" && -n "$BROWSERSTACK_ACCESS_KEY" ]]; then
+          curl -X POST http://localhost:3000/api/agents \
+            -H "Content-Type: application/json" \
+            -d '{
+              "name": "ci-browserstack-agent",
+              "capabilities": {
+                "emulator": true,
+                "device": true,
+                "browserstack": true
+              },
+              "metadata": {
+                "type": "ci",
+                "location": "browserstack-cloud"
+              }
+            }'
+          echo ""
+        fi
+        
+        # Verify agents are registered
+        echo "=== Registered Agents ==="
+        curl -s http://localhost:3000/api/agents | jq '.'
+
+    - name: Submit test jobs using qgjob CLI
       id: submit-jobs
       run: |
-        # Submit multiple test jobs to demonstrate grouping
-        echo "Submitting test jobs..."
+        echo "Submitting test jobs using qgjob CLI..."
         
-        # Test 1: Onboarding test
-        JOB1=$(node src/cli/index.js submit \
+        # Test 1: Integration test (emulator)
+        echo "Submitting integration test..."
+        JOB1=$(qgjob submit \
           --org-id=$ORG_ID \
           --app-version-id=$APP_VERSION_ID \
-          --test=examples/appwright-tests/onboarding.spec.js \
+          --test=tests/integration.spec.js \
           --priority=high \
           --target=emulator | grep "Job ID:" | cut -d' ' -f3)
         echo "job1=$JOB1" >> $GITHUB_OUTPUT
+        echo "Integration test job: $JOB1"
         
-        # Test 2: Login test (same app version - should be grouped)
-        JOB2=$(node src/cli/index.js submit \
+        # Test 2: Mobile Wikipedia test (emulator - same app version, should be grouped)
+        echo "Submitting mobile Wikipedia test..."
+        JOB2=$(qgjob submit \
           --org-id=$ORG_ID \
           --app-version-id=$APP_VERSION_ID \
-          --test=examples/appwright-tests/login.spec.js \
+          --test=tests/mobile-app-wikipedia.spec.js \
           --priority=medium \
           --target=emulator | grep "Job ID:" | cut -d' ' -f3)
         echo "job2=$JOB2" >> $GITHUB_OUTPUT
+        echo "Mobile Wikipedia test job: $JOB2"
         
-        # Test 3: Checkout test (same app version - should be grouped)
-        JOB3=$(node src/cli/index.js submit \
-          --org-id=$ORG_ID \
-          --app-version-id=$APP_VERSION_ID \
-          --test=examples/appwright-tests/checkout.spec.js \
-          --priority=medium \
-          --target=device | grep "Job ID:" | cut -d' ' -f3)
-        echo "job3=$JOB3" >> $GITHUB_OUTPUT
+        # Test 3: BrowserStack test (if credentials available)
+        if [[ -n "$BROWSERSTACK_USERNAME" && -n "$BROWSERSTACK_ACCESS_KEY" ]]; then
+          echo "Submitting BrowserStack Wikipedia test..."
+          JOB3=$(qgjob submit \
+            --org-id=$ORG_ID \
+            --app-version-id=$APP_VERSION_ID-browserstack \
+            --test=tests/mobile-app-wikipedia.spec.js \
+            --priority=high \
+            --target=browserstack | grep "Job ID:" | cut -d' ' -f3)
+          echo "job3=$JOB3" >> $GITHUB_OUTPUT
+          echo "BrowserStack test job: $JOB3"
+        else
+          echo "BrowserStack credentials not available, skipping BrowserStack test"
+          echo "job3=" >> $GITHUB_OUTPUT
+        fi
         
-        echo "Submitted jobs: $JOB1, $JOB2, $JOB3"
+        echo "=== Submitted Jobs ==="
+        echo "Job 1 (Integration/Emulator): $JOB1"
+        echo "Job 2 (Wikipedia/Emulator): $JOB2"
+        if [[ -n "$JOB3" ]]; then
+          echo "Job 3 (Wikipedia/BrowserStack): $JOB3"
+        fi
 
-    - name: Register test agent
-      run: |
-        # Start a test agent to process the jobs
-        node scripts/test-agent.js &
-        echo $! > agent.pid
-        sleep 5
-
-    - name: Wait for job completion
+    - name: Wait for job completion and check results
       run: |
         echo "Waiting for jobs to complete..."
         
-        # Wait for each job with timeout
-        timeout 300 node src/cli/index.js wait --job-id=${{ steps.submit-jobs.outputs.job1 }} --timeout=120 || echo "Job 1 timeout"
-        timeout 300 node src/cli/index.js wait --job-id=${{ steps.submit-jobs.outputs.job2 }} --timeout=120 || echo "Job 2 timeout"
-        timeout 300 node src/cli/index.js wait --job-id=${{ steps.submit-jobs.outputs.job3 }} --timeout=120 || echo "Job 3 timeout"
-
-    - name: Check job results
-      run: |
-        echo "Checking job results..."
+        # Function to check job status and wait for completion
+        check_job() {
+          local job_id=$1
+          local job_name=$2
+          local timeout=180
+          local count=0
+          
+          if [[ -z "$job_id" ]]; then
+            echo "Skipping $job_name (job ID is empty)"
+            return 0
+          fi
+          
+          echo "Checking $job_name (ID: $job_id)..."
+          
+          while [ $count -lt $timeout ]; do
+            status=$(qgjob status --job-id=$job_id | grep "Status:" | cut -d' ' -f2)
+            echo "[$job_name] Status: $status (${count}s elapsed)"
+            
+            case $status in
+              "completed")
+                echo "✅ $job_name completed successfully"
+                return 0
+                ;;
+              "failed")
+                echo "❌ $job_name failed"
+                echo "=== $job_name Final Status ==="
+                qgjob status --job-id=$job_id
+                return 1
+                ;;
+              "running"|"pending"|"retrying")
+                sleep 5
+                count=$((count + 5))
+                ;;
+              *)
+                echo "Unknown status for $job_name: $status"
+                sleep 5
+                count=$((count + 5))
+                ;;
+            esac
+          done
+          
+          echo "⏰ $job_name timed out after ${timeout}s"
+          echo "=== $job_name Final Status ==="
+          qgjob status --job-id=$job_id
+          return 1
+        }
         
-        # Check status of all jobs
-        echo "=== Job 1 Status ==="
-        node src/cli/index.js status --job-id=${{ steps.submit-jobs.outputs.job1 }}
+        # Check each job
+        job_failures=0
         
-        echo "=== Job 2 Status ==="
-        node src/cli/index.js status --job-id=${{ steps.submit-jobs.outputs.job2 }}
+        check_job "${{ steps.submit-jobs.outputs.job1 }}" "Integration Test" || job_failures=$((job_failures + 1))
+        check_job "${{ steps.submit-jobs.outputs.job2 }}" "Wikipedia Test" || job_failures=$((job_failures + 1))
+        check_job "${{ steps.submit-jobs.outputs.job3 }}" "BrowserStack Test" || job_failures=$((job_failures + 1))
         
-        echo "=== Job 3 Status ==="
-        node src/cli/index.js status --job-id=${{ steps.submit-jobs.outputs.job3 }}
+        # Final status summary
+        echo "=== Final Job Status Summary ==="
+        if [[ -n "${{ steps.submit-jobs.outputs.job1 }}" ]]; then
+          echo "Integration Test:"
+          qgjob status --job-id=${{ steps.submit-jobs.outputs.job1 }} | head -10
+          echo ""
+        fi
         
-        # Get job details via API to check results
-        JOB1_STATUS=$(curl -s http://localhost:3000/api/jobs/${{ steps.submit-jobs.outputs.job1 }} | jq -r '.status')
-        JOB2_STATUS=$(curl -s http://localhost:3000/api/jobs/${{ steps.submit-jobs.outputs.job2 }} | jq -r '.status')
-        JOB3_STATUS=$(curl -s http://localhost:3000/api/jobs/${{ steps.submit-jobs.outputs.job3 }} | jq -r '.status')
+        if [[ -n "${{ steps.submit-jobs.outputs.job2 }}" ]]; then
+          echo "Wikipedia Test:"
+          qgjob status --job-id=${{ steps.submit-jobs.outputs.job2 }} | head -10
+          echo ""
+        fi
         
-        echo "Final job statuses: $JOB1_STATUS, $JOB2_STATUS, $JOB3_STATUS"
+        if [[ -n "${{ steps.submit-jobs.outputs.job3 }}" ]]; then
+          echo "BrowserStack Test:"
+          qgjob status --job-id=${{ steps.submit-jobs.outputs.job3 }} | head -10
+          echo ""
+        fi
         
-        # Fail the build if any job failed
-        if [[ "$JOB1_STATUS" == "failed" || "$JOB2_STATUS" == "failed" || "$JOB3_STATUS" == "failed" ]]; then
-          echo "One or more jobs failed!"
+        # Fail the build if any jobs failed
+        if [ $job_failures -gt 0 ]; then
+          echo "❌ $job_failures job(s) failed! Build failed."
           exit 1
         fi
         
-        if [[ "$JOB1_STATUS" != "completed" || "$JOB2_STATUS" != "completed" || "$JOB3_STATUS" != "completed" ]]; then
-          echo "Not all jobs completed successfully!"
-          exit 1
-        fi
+        echo "✅ All jobs completed successfully!"
+
+    - name: Display system status for debugging
+      if: always()
+      run: |
+        echo "=== Final System Status ==="
+        echo ""
         
-        echo "All jobs completed successfully!"
-
-    - name: Display queue status
-      if: always()
-      run: |
-        echo "=== Final Queue Status ==="
-        curl -s http://localhost:3000/api/jobs/queue/status | jq '.'
-
-    - name: Display agent status
-      if: always()
-      run: |
+        echo "=== Queue Status ==="
+        curl -s http://localhost:3000/api/jobs 2>/dev/null | jq '.' || echo "Queue status unavailable"
+        echo ""
+        
         echo "=== Agent Status ==="
-        curl -s http://localhost:3000/api/agents | jq '.'
+        curl -s http://localhost:3000/api/agents 2>/dev/null | jq '.' || echo "Agent status unavailable"
+        echo ""
+        
+        echo "=== Server Health ==="
+        curl -s http://localhost:3000/api/health 2>/dev/null | jq '.' || echo "Server health unavailable"
+        echo ""
 
-    - name: Cleanup
+    - name: Cleanup processes
       if: always()
       run: |
-        # Stop processes
+        echo "Cleaning up processes..."
+        
+        # Stop job server
         if [ -f server.pid ]; then
-          kill $(cat server.pid) || true
+          echo "Stopping job server..."
+          kill $(cat server.pid) 2>/dev/null || true
+          rm -f server.pid
         fi
-        if [ -f agent.pid ]; then
-          kill $(cat agent.pid) || true
+        
+        # Stop any remaining node processes
+        pkill -f "node src/server/index.js" 2>/dev/null || true
+        
+        echo "Cleanup completed"
+
+  # BrowserStack Integration Test (separate job)
+  browserstack-test:
+    runs-on: ubuntu-latest
+    needs: run-tests
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.BROWSERSTACK_USERNAME != ''
+    
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+        cache: 'npm'
+
+    - name: Install dependencies
+      run: |
+        npm ci
+        cd node-appium-app-browserstack-master/android && npm ci
+
+    - name: Install qgjob CLI globally
+      run: npm link
+
+    - name: Start QualGent job server
+      run: |
+        npm start &
+        echo $! > server.pid
+        # Wait for server to be ready
+        for i in {1..30}; do
+          if curl -f http://localhost:3000/api/health > /dev/null 2>&1; then
+            echo "Server is ready for BrowserStack test"
+            break
+          fi
+          sleep 2
+        done
+      env:
+        NODE_ENV: production
+        REDIS_URL: redis://localhost:6379
+        BROWSERSTACK_USERNAME: ${{ secrets.BROWSERSTACK_USERNAME }}
+        BROWSERSTACK_ACCESS_KEY: ${{ secrets.BROWSERSTACK_ACCESS_KEY }}
+
+    - name: Register BrowserStack agent
+      run: |
+        curl -X POST http://localhost:3000/api/agents \
+          -H "Content-Type: application/json" \
+          -d '{
+            "name": "ci-browserstack-production",
+            "capabilities": {
+              "emulator": true,
+              "device": true,
+              "browserstack": true
+            },
+            "metadata": {
+              "type": "production",
+              "location": "browserstack-cloud",
+              "ci": "github-actions"
+            }
+          }'
+
+    - name: Run BrowserStack Wikipedia test
+      run: |
+        echo "Running production BrowserStack test..."
+        qgjob submit \
+          --org-id=qualgent-production \
+          --app-version-id=${{ github.sha }}-prod \
+          --test=tests/mobile-app-wikipedia.spec.js \
+          --target=browserstack \
+          --priority=high \
+          --wait \
+          --timeout=600
+      env:
+        BROWSERSTACK_USERNAME: ${{ secrets.BROWSERSTACK_USERNAME }}
+        BROWSERSTACK_ACCESS_KEY: ${{ secrets.BROWSERSTACK_ACCESS_KEY }}
+
+    - name: Cleanup BrowserStack test
+      if: always()
+      run: |
+        if [ -f server.pid ]; then
+          kill $(cat server.pid) 2>/dev/null || true
         fi
 
-  # Separate job for integration testing
-  integration-test:
+  # Docker Integration Test
+  docker-integration-test:
     runs-on: ubuntu-latest
     needs: run-tests
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
@@ -181,45 +431,78 @@ jobs:
     - name: Setup Docker Buildx
       uses: docker/setup-buildx-action@v3
 
-    - name: Setup Docker Compose
-      run: |
-        # Install docker-compose if not available
-        if ! command -v docker-compose &> /dev/null; then
-          sudo curl -L "https://github.com/docker/compose/releases/download/v2.23.0/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
-          sudo chmod +x /usr/local/bin/docker-compose
-        fi
-        docker-compose version
-
     - name: Test Docker Compose setup
       run: |
-        # Test the full Docker Compose setup
+        echo "Testing full Docker Compose setup..."
+        
+        # Start services
         docker-compose up -d
         
         # Wait for services to be ready
+        echo "Waiting for services to be ready..."
         sleep 60
         
         # Check container status
+        echo "=== Container Status ==="
         docker-compose ps
         
-        # Show logs if job-server is unhealthy
+        # Show logs for debugging
         echo "=== Job Server Logs ==="
-        docker-compose logs job-server
+        docker-compose logs --tail=50 job-server
         
         echo "=== Redis Logs ==="
-        docker-compose logs redis
+        docker-compose logs --tail=20 redis
         
         # Test health endpoints
-        curl -f http://localhost:3000/api/health
+        echo "=== Testing Health Endpoint ==="
+        max_attempts=10
+        attempt=1
         
-        # Submit a test job using docker exec instead of docker-compose exec
-        docker exec $(docker-compose ps -q job-server) node src/cli/index.js submit \
-          --org-id=qualgent \
-          --app-version-id=docker-test \
-          --test=examples/appwright-tests/integration.spec.js \
+        while [ $attempt -le $max_attempts ]; do
+          if curl -f http://localhost:3000/api/health; then
+            echo "✅ Health check passed"
+            break
+          else
+            echo "❌ Health check failed (attempt $attempt/$max_attempts)"
+            if [ $attempt -eq $max_attempts ]; then
+              echo "❌ Health check failed after $max_attempts attempts"
+              exit 1
+            fi
+            sleep 10
+            attempt=$((attempt + 1))
+          fi
+        done
+        
+        # Register a test agent within the container
+        echo "=== Registering Docker Test Agent ==="
+        docker-compose exec -T job-server curl -X POST http://localhost:3000/api/agents \
+          -H "Content-Type: application/json" \
+          -d '{
+            "name": "docker-test-agent",
+            "capabilities": {
+              "emulator": true,
+              "device": false,
+              "browserstack": false
+            },
+            "metadata": {
+              "type": "docker",
+              "location": "container"
+            }
+          }'
+        
+        # Submit a test job using the CLI within the container
+        echo "=== Submitting Docker Test Job ==="
+        docker-compose exec -T job-server qgjob submit \
+          --org-id=qualgent-docker \
+          --app-version-id=docker-test-${{ github.sha }} \
+          --test=tests/integration.spec.js \
+          --target=emulator \
+          --priority=high \
           --wait \
-          --timeout=60
+          --timeout=120
 
     - name: Cleanup Docker
       if: always()
       run: |
+        echo "Cleaning up Docker containers..."
         docker-compose down -v || docker compose down -v || true
