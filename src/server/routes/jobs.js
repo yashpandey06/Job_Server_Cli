@@ -81,6 +81,41 @@ const jobSchema = Joi.object({
  *           application/json:
  *             schema:
  *               $ref: '#/components/schemas/Error'
+ *       409:
+ *         description: Duplicate job - A pending job with identical parameters already exists
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 error:
+ *                   type: string
+ *                   example: "Duplicate job"
+ *                 message:
+ *                   type: string
+ *                   example: "A pending job with identical parameters already exists"
+ *                 existing_job:
+ *                   type: object
+ *                   properties:
+ *                     id:
+ *                       type: string
+ *                     status:
+ *                       type: string
+ *                     created_at:
+ *                       type: string
+ *                     queue_position:
+ *                       type: string
+ *                 duplicate_criteria:
+ *                   type: object
+ *                   properties:
+ *                     org_id:
+ *                       type: string
+ *                     app_version_id:
+ *                       type: string
+ *                     test_path:
+ *                       type: string
+ *                     target:
+ *                       type: string
  */
 router.post('/', async (req, res) => {
   try {
@@ -90,6 +125,43 @@ router.post('/', async (req, res) => {
       return res.status(400).json({
         error: 'Validation error',
         message: error.details[0].message
+      });
+    }
+
+    // Check for duplicate pending jobs
+    const existingJobs = await JobStore.getAllJobs();
+    const duplicateJob = existingJobs.find(existingJob => 
+      existingJob.org_id === value.org_id &&
+      existingJob.app_version_id === value.app_version_id &&
+      existingJob.test_path === value.test_path &&
+      existingJob.target === value.target &&
+      existingJob.status === 'pending'
+    );
+
+    if (duplicateJob) {
+      logger.info(`Duplicate job detected:`, { 
+        existingJobId: duplicateJob.id,
+        orgId: value.org_id,
+        appVersionId: value.app_version_id,
+        testPath: value.test_path,
+        target: value.target
+      });
+
+      return res.status(409).json({
+        error: 'Duplicate job',
+        message: 'A pending job with identical parameters already exists',
+        existing_job: {
+          id: duplicateJob.id,
+          status: duplicateJob.status,
+          created_at: duplicateJob.created_at,
+          queue_position: 'N/A'
+        },
+        duplicate_criteria: {
+          org_id: value.org_id,
+          app_version_id: value.app_version_id,
+          test_path: value.test_path,
+          target: value.target
+        }
       });
     }
 

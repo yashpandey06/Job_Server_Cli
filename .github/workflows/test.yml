@@ -98,7 +98,7 @@ jobs:
         echo "Registering test agents..."
         
         # Register emulator agent
-        curl -X POST http://localhost:3000/api/agents \
+        EMULATOR_AGENT_RESPONSE=$(curl -s -X POST http://localhost:3000/api/agents \
           -H "Content-Type: application/json" \
           -d '{
             "name": "ci-emulator-agent",
@@ -111,11 +111,13 @@ jobs:
               "type": "ci",
               "location": "github-actions"
             }
-          }'
-        echo ""
+          }')
+        echo "Emulator agent registered: $EMULATOR_AGENT_RESPONSE"
+        EMULATOR_AGENT_ID=$(echo "$EMULATOR_AGENT_RESPONSE" | jq -r '.agent.id // empty')
+        echo "emulator_agent_id=$EMULATOR_AGENT_ID" >> $GITHUB_OUTPUT
         
         # Register device agent
-        curl -X POST http://localhost:3000/api/agents \
+        DEVICE_AGENT_RESPONSE=$(curl -s -X POST http://localhost:3000/api/agents \
           -H "Content-Type: application/json" \
           -d '{
             "name": "ci-device-agent",
@@ -128,12 +130,15 @@ jobs:
               "type": "ci",
               "location": "github-actions"
             }
-          }'
-        echo ""
+          }')
+        echo "Device agent registered: $DEVICE_AGENT_RESPONSE"
+        DEVICE_AGENT_ID=$(echo "$DEVICE_AGENT_RESPONSE" | jq -r '.agent.id // empty')
+        echo "device_agent_id=$DEVICE_AGENT_ID" >> $GITHUB_OUTPUT
         
         # Register BrowserStack agent (if credentials available)
         if [[ -n "$BROWSERSTACK_USERNAME" && -n "$BROWSERSTACK_ACCESS_KEY" ]]; then
-          curl -X POST http://localhost:3000/api/agents \
+          echo "BrowserStack credentials found, registering BrowserStack agent..."
+          BROWSERSTACK_AGENT_RESPONSE=$(curl -s -X POST http://localhost:3000/api/agents \
             -H "Content-Type: application/json" \
             -d '{
               "name": "ci-browserstack-agent",
@@ -146,63 +151,98 @@ jobs:
                 "type": "ci",
                 "location": "browserstack-cloud"
               }
-            }'
-          echo ""
+            }')
+          echo "BrowserStack agent registered: $BROWSERSTACK_AGENT_RESPONSE"
+          BROWSERSTACK_AGENT_ID=$(echo "$BROWSERSTACK_AGENT_RESPONSE" | jq -r '.agent.id // empty')
+          echo "browserstack_agent_id=$BROWSERSTACK_AGENT_ID" >> $GITHUB_OUTPUT
+        else
+          echo "BrowserStack credentials not available, skipping BrowserStack agent registration"
+          echo "browserstack_agent_id=" >> $GITHUB_OUTPUT
         fi
         
         # Verify agents are registered
         echo "=== Registered Agents ==="
-        curl -s http://localhost:3000/api/agents | jq '.'
+        curl -s http://localhost:3000/api/agents | jq '.agents[] | {id: .id, name: .name, capabilities: .capabilities, status: .status}'
+      id: register-agents
+
+    - name: Keep agents alive with heartbeats
+      run: |
+        echo "Starting agent heartbeat process..."
+        
+        # Function to send heartbeats for all agents
+        send_heartbeats() {
+          while true; do
+            # Get all agent IDs
+            AGENT_IDS=$(curl -s http://localhost:3000/api/agents | jq -r '.agents[].id')
+            
+            for agent_id in $AGENT_IDS; do
+              # Send heartbeat for each agent
+              curl -s -X PUT "http://localhost:3000/api/agents/$agent_id/heartbeat" > /dev/null 2>&1 || true
+            done
+            
+            sleep 10
+          done
+        }
+        
+        # Start heartbeat process in background
+        send_heartbeats &
+        HEARTBEAT_PID=$!
+        echo "heartbeat_pid=$HEARTBEAT_PID" >> $GITHUB_OUTPUT
+        echo "Agent heartbeat process started with PID: $HEARTBEAT_PID"
+      id: agent-heartbeat
 
     - name: Submit test jobs using qgjob CLI
       id: submit-jobs
       run: |
         echo "Submitting test jobs using qgjob CLI..."
         
+        # Wait a moment for agents to be ready
+        sleep 3
+        
         # Test 1: Integration test (emulator)
         echo "Submitting integration test..."
         JOB1=$(qgjob submit \
           --org-id=$ORG_ID \
-          --app-version-id=$APP_VERSION_ID \
+          --app-version-id=$APP_VERSION_ID-integration \
           --test=tests/integration.spec.js \
-          --priority=high \
+          --priority=medium \
           --target=emulator | grep "Job ID:" | cut -d' ' -f3)
         echo "job1=$JOB1" >> $GITHUB_OUTPUT
         echo "Integration test job: $JOB1"
         
-        # Test 2: Mobile Wikipedia test (emulator - same app version, should be grouped)
-        echo "Submitting mobile Wikipedia test..."
-        JOB2=$(qgjob submit \
-          --org-id=$ORG_ID \
-          --app-version-id=$APP_VERSION_ID \
-          --test=tests/mobile-app-wikipedia.spec.js \
-          --priority=medium \
-          --target=emulator | grep "Job ID:" | cut -d' ' -f3)
-        echo "job2=$JOB2" >> $GITHUB_OUTPUT
-        echo "Mobile Wikipedia test job: $JOB2"
-        
-        # Test 3: BrowserStack test (if credentials available)
+        # Test 2: BrowserStack Wikipedia test (same as manual test)
         if [[ -n "$BROWSERSTACK_USERNAME" && -n "$BROWSERSTACK_ACCESS_KEY" ]]; then
-          echo "Submitting BrowserStack Wikipedia test..."
-          JOB3=$(qgjob submit \
-            --org-id=$ORG_ID \
-            --app-version-id=$APP_VERSION_ID-browserstack \
-            --test=tests/mobile-app-wikipedia.spec.js \
-            --priority=high \
-            --target=browserstack | grep "Job ID:" | cut -d' ' -f3)
-          echo "job3=$JOB3" >> $GITHUB_OUTPUT
-          echo "BrowserStack test job: $JOB3"
+          echo "Submitting BrowserStack Wikipedia test (matching manual test)..."
+          JOB2=$(qgjob submit \
+            --org-id="test-org" \
+            --app-version-id="wiki-v1.0" \
+            --test="tests/mobile-app-wikipedia.spec.js" \
+            --target="browserstack" \
+            --priority="high" | grep "Job ID:" | cut -d' ' -f3)
+          echo "job2=$JOB2" >> $GITHUB_OUTPUT
+          echo "BrowserStack Wikipedia test job: $JOB2"
         else
           echo "BrowserStack credentials not available, skipping BrowserStack test"
-          echo "job3=" >> $GITHUB_OUTPUT
+          echo "job2=" >> $GITHUB_OUTPUT
         fi
+        
+        # Test 3: Device test (different app version)
+        echo "Submitting device test..."
+        JOB3=$(qgjob submit \
+          --org-id=$ORG_ID \
+          --app-version-id=$APP_VERSION_ID-device \
+          --test=tests/integration.spec.js \
+          --priority=low \
+          --target=device | grep "Job ID:" | cut -d' ' -f3)
+        echo "job3=$JOB3" >> $GITHUB_OUTPUT
+        echo "Device test job: $JOB3"
         
         echo "=== Submitted Jobs ==="
         echo "Job 1 (Integration/Emulator): $JOB1"
-        echo "Job 2 (Wikipedia/Emulator): $JOB2"
-        if [[ -n "$JOB3" ]]; then
-          echo "Job 3 (Wikipedia/BrowserStack): $JOB3"
+        if [[ -n "$JOB2" ]]; then
+          echo "Job 2 (Wikipedia/BrowserStack): $JOB2"
         fi
+        echo "Job 3 (Integration/Device): $JOB3"
 
     - name: Wait for job completion and check results
       run: |
@@ -258,26 +298,26 @@ jobs:
         # Check each job
         job_failures=0
         
-        check_job "${{ steps.submit-jobs.outputs.job1 }}" "Integration Test" || job_failures=$((job_failures + 1))
-        check_job "${{ steps.submit-jobs.outputs.job2 }}" "Wikipedia Test" || job_failures=$((job_failures + 1))
-        check_job "${{ steps.submit-jobs.outputs.job3 }}" "BrowserStack Test" || job_failures=$((job_failures + 1))
+        check_job "${{ steps.submit-jobs.outputs.job1 }}" "Integration Emulator Test" || job_failures=$((job_failures + 1))
+        check_job "${{ steps.submit-jobs.outputs.job2 }}" "BrowserStack Wikipedia Test" || job_failures=$((job_failures + 1))
+        check_job "${{ steps.submit-jobs.outputs.job3 }}" "Integration Device Test" || job_failures=$((job_failures + 1))
         
         # Final status summary
         echo "=== Final Job Status Summary ==="
         if [[ -n "${{ steps.submit-jobs.outputs.job1 }}" ]]; then
-          echo "Integration Test:"
+          echo "Integration Emulator Test:"
           qgjob status --job-id=${{ steps.submit-jobs.outputs.job1 }} | head -10
           echo ""
         fi
         
         if [[ -n "${{ steps.submit-jobs.outputs.job2 }}" ]]; then
-          echo "Wikipedia Test:"
+          echo "BrowserStack Wikipedia Test:"
           qgjob status --job-id=${{ steps.submit-jobs.outputs.job2 }} | head -10
           echo ""
         fi
         
         if [[ -n "${{ steps.submit-jobs.outputs.job3 }}" ]]; then
-          echo "BrowserStack Test:"
+          echo "Integration Device Test:"
           qgjob status --job-id=${{ steps.submit-jobs.outputs.job3 }} | head -10
           echo ""
         fi
@@ -312,6 +352,12 @@ jobs:
       if: always()
       run: |
         echo "Cleaning up processes..."
+        
+        # Stop heartbeat process
+        if [[ -n "${{ steps.agent-heartbeat.outputs.heartbeat_pid }}" ]]; then
+          echo "Stopping agent heartbeat process..."
+          kill "${{ steps.agent-heartbeat.outputs.heartbeat_pid }}" 2>/dev/null || true
+        fi
         
         # Stop job server
         if [ -f server.pid ]; then

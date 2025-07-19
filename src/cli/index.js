@@ -121,6 +121,54 @@ async function checkStatus(jobId) {
 }
 
 /**
+ * Register an agent with the orchestrator
+ * @param {Object} options - Agent registration options
+ */
+async function registerAgent(options) {
+  try {
+    const agentPayload = {
+      name: options.name,
+      capabilities: {
+        emulator: options.capabilities.includes('emulator'),
+        device: options.capabilities.includes('device'),
+        browserstack: options.capabilities.includes('browserstack')
+      },
+      metadata: {
+        type: options.type || 'manual',
+        location: options.location || 'unknown'
+      }
+    };
+
+    logger.info(`Registering agent: ${options.name}`);
+    
+    const response = await axios.post(`${API_BASE_URL}/agents`, agentPayload, {
+      timeout: 10000,
+      headers: {
+        'Content-Type': 'application/json'
+      }
+    });
+
+    if (response.status === 201) {
+      logger.info(`Agent registered successfully!`);
+      console.log(`Agent ID: ${response.data.agent.id}`);
+      console.log(`Agent Name: ${response.data.agent.name}`);
+      console.log(`Capabilities: ${JSON.stringify(response.data.agent.capabilities)}`);
+      console.log(`Status: ${response.data.agent.status}`);
+      return response.data.agent.id;
+    }
+  } catch (error) {
+    if (error.response) {
+      logger.error(`API Error: ${error.response.status} - ${error.response.data.message || error.response.data}`);
+    } else if (error.request) {
+      logger.error('Network Error: Unable to reach the job server. Make sure the server is running.');
+    } else {
+      logger.error(`Error: ${error.message}`);
+    }
+    process.exit(1);
+  }
+}
+
+/**
  * Wait for job completion and poll status
  * @param {string} jobId - The job ID to wait for
  * @param {number} timeout - Timeout in seconds (default: 300)
@@ -186,6 +234,19 @@ program
     if (options.wait) {
       await waitForCompletion(jobId, parseInt(options.timeout));
     }
+  });
+
+program
+  .command('register-agent')
+  .description('Register an agent with the orchestrator')
+  .requiredOption('--name <name>', 'Agent name')
+  .requiredOption('--capabilities <capabilities>', 'Comma-separated list of capabilities (emulator,device,browserstack)')
+  .option('--type <type>', 'Agent type', 'manual')
+  .option('--location <location>', 'Agent location', 'unknown')
+  .action(async (options) => {
+    // Parse capabilities
+    options.capabilities = options.capabilities.split(',').map(c => c.trim());
+    await registerAgent(options);
   });
 
 program
