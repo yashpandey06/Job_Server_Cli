@@ -1,0 +1,52 @@
+{
+  "name": "qualgent-test-orchestrator",
+  "version": "1.0.0",
+  "description": "QualGent Backend Coding Challenge - CLI tool and backend service for AppWright test orchestration",
+  "main": "src/server/index.js",
+  "bin": {
+    "qgjob": "./src/cli/index.js"
+  },
+  "scripts": {
+    "start": "node src/server/index.js",
+    "dev": "nodemon src/server/index.js",
+    "cli": "node src/cli/index.js",
+    "test": "jest",
+    "build": "npm install",
+    "docker:build": "docker-compose build",
+    "docker:up": "docker-compose up",
+    "docker:down": "docker-compose down"
+  },
+  "keywords": [
+    "test-automation",
+    "appwright",
+    "cli",
+    "job-orchestrator",
+    "testing"
+  ],
+  "author": "QualGent",
+  "license": "MIT",
+  "dependencies": {
+    "@playwright/test": "^1.40.0",
+    "axios": "^1.4.0",
+    "browserstack-node-sdk": "^1.2.0",
+    "commander": "^11.0.0",
+    "cors": "^2.8.5",
+    "dotenv": "^16.3.1",
+    "express": "^4.18.2",
+    "helmet": "^7.0.0",
+    "joi": "^17.9.2",
+    "redis": "^4.6.0",
+    "swagger-jsdoc": "^6.2.8",
+    "swagger-ui-express": "^5.0.1",
+    "uuid": "^9.0.0",
+    "winston": "^3.10.0"
+  },
+  "devDependencies": {
+    "jest": "^29.6.0",
+    "nodemon": "^3.0.1",
+    "supertest": "^6.3.3"
+  },
+  "engines": {
+    "node": ">=16.0.0"
+  }
+}

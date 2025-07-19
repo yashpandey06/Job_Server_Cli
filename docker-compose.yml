@@ -1,0 +1,61 @@
+version: '3.8'
+
+services:
+  # Redis for job queuing and caching
+  redis:
+    image: redis:7-alpine
+    container_name: qualgent-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Job orchestrator backend service
+  job-server:
+    build:
+      context: .
+      dockerfile: Dockerfile.server
+    container_name: qualgent-job-server
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+      - REDIS_URL=redis://redis:6379
+      - PORT=3000
+      - LOG_LEVEL=info
+    volumes:
+      - ./logs:/app/logs
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/api/health"]
+      interval: 15s
+      timeout: 10s
+      retries: 15
+      start_period: 30s
+
+  # Example test agent (simulates a worker)
+  test-agent:
+    build:
+      context: .
+      dockerfile: Dockerfile.agent
+    container_name: qualgent-test-agent
+    environment:
+      - QGJOB_API_URL=http://job-server:3000/api
+      - AGENT_NAME=test-agent-1
+      - AGENT_CAPABILITIES=emulator,device,browserstack
+    depends_on:
+      job-server:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  redis_data:
