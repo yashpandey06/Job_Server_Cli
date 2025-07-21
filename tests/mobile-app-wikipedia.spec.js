@@ -1,6 +1,5 @@
 /**
- * QualGent Mobile App Test - Wikipedia Android
- * This test runs through the QualGent orchestrator using Appium on BrowserStack
+ * QualGent Mobile App Test - Wikipedia Android (BrowserStack)
  */
 
 var assert = require('assert');

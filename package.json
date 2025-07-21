@@ -12,6 +12,7 @@
     "cli": "node src/cli/index.js",
     "test": "jest",
     "test:mobile": "mocha tests/mobile-app-wikipedia.spec.js --timeout 120000",
+    "test:local-device": "mocha tests/mobile-app-wikipedia-local.spec.js --timeout 120000",
     "build": "npm install",
     "docker:build": "docker-compose build",
     "docker:up": "docker-compose up",
