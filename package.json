@@ -11,6 +11,9 @@
     "dev": "nodemon src/server/index.js",
     "cli": "node src/cli/index.js",
     "test": "jest",
+    "test:appwright": "appwright test",
+    "test:appwright:android": "appwright test --project=android-browserstack",
+    "test:appwright:ios": "appwright test --project=ios-browserstack",
     "test:mobile": "mocha tests/mobile-app-wikipedia.spec.js --timeout 120000",
     "test:local-device": "mocha tests/mobile-app-wikipedia-local.spec.js --timeout 120000",
     "build": "npm install",
@@ -29,6 +32,7 @@
   "license": "MIT",
   "dependencies": {
     "@playwright/test": "^1.40.0",
+    "appwright": "^1.0.0",
     "axios": "^1.4.0",
     "browserstack-node-sdk": "^1.2.0",
     "commander": "^11.0.0",
@@ -49,7 +53,8 @@
     "mocha": "^11.7.1",
     "nodemon": "^3.0.1",
     "selenium-webdriver": "^4.34.0",
-    "supertest": "^6.3.3"
+    "supertest": "^6.3.3",
+    "appwright": "^0.1.1"
   },
   "engines": {
     "node": ">=16.0.0"

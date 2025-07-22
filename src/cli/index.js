@@ -23,11 +23,57 @@ const logger = winston.createLogger({
 const API_BASE_URL = process.env.QGJOB_API_URL || 'http://localhost:3000/api';
 
 /**
+ * Detect if a test file is an AppWright test
+ * @param {string} testPath - Path to the test file
+ * @returns {Promise<boolean>} - True if it's an AppWright test
+ */
+async function detectAppWrightTest(testPath) {
+  try {
+    const fs = require('fs').promises;
+    const content = await fs.readFile(testPath, 'utf8');
+    
+    // Check if the test file imports from "appwright"
+    return content.includes('from "appwright"') || content.includes("from 'appwright'");
+  } catch (error) {
+    logger.warn(`Could not read test file ${testPath}: ${error.message}`);
+    return false;
+  }
+}
+
+/**
+ * Get default AppWright project based on target and platform
+ * @param {string} target - Target environment (browserstack, emulator, device)
+ * @param {string} platform - Platform (android, ios)
+ * @returns {string} - AppWright project name
+ */
+function getDefaultAppWrightProject(target, platform = 'android') {
+  const projectMap = {
+    'browserstack': {
+      'android': 'android-browserstack',
+      'ios': 'ios-browserstack'
+    },
+    'emulator': {
+      'android': 'android-emulator',
+      'ios': 'ios-emulator'
+    },
+    'device': {
+      'android': 'android-emulator', // fallback to emulator config
+      'ios': 'ios-emulator'
+    }
+  };
+
+  return projectMap[target]?.[platform] || 'android-emulator';
+}
+
+/**
  * Submit a test job to the orchestrator
  * @param {Object} options - Job submission options
  */
 async function submitJob(options) {
   try {
+    // Detect if this is an AppWright test
+    const isAppWrightTest = await detectAppWrightTest(options.test);
+    
     const jobPayload = {
       id: uuidv4(),
       org_id: options.orgId,
@@ -36,10 +82,12 @@ async function submitJob(options) {
       priority: options.priority || 'medium',
       target: options.target || 'emulator',
       created_at: new Date().toISOString(),
-      status: 'pending'
+      status: 'pending',
+      test_framework: isAppWrightTest ? 'appwright' : 'legacy',
+      appwright_project: options.appwrightProject || getDefaultAppWrightProject(options.target, options.platform)
     };
 
-    logger.info(`Submitting job for org: ${options.orgId}, app_version: ${options.appVersionId}`);
+    logger.info(`Submitting ${jobPayload.test_framework} job for org: ${options.orgId}, app_version: ${options.appVersionId}`);
     
     const response = await axios.post(`${API_BASE_URL}/jobs`, jobPayload, {
       timeout: 10000,
@@ -226,6 +274,8 @@ program
   .requiredOption('--test <testPath>', 'Path to test file')
   .option('--priority <priority>', 'Job priority (low, medium, high)', 'medium')
   .option('--target <target>', 'Target environment (emulator, device, browserstack)', 'emulator')
+  .option('--platform <platform>', 'Platform (android, ios)', 'android')
+  .option('--appwright-project <project>', 'AppWright project name (android-browserstack, ios-browserstack, etc.)')
   .option('--wait', 'Wait for job completion')
   .option('--timeout <seconds>', 'Timeout for waiting (seconds)', '300')
   .action(async (options) => {
@@ -262,6 +312,82 @@ program
   .option('--timeout <seconds>', 'Timeout in seconds', '300')
   .action(async (options) => {
     await waitForCompletion(options.jobId, parseInt(options.timeout));
+  });
+
+// Convenience commands for AppWright testing
+program
+  .command('test:android-browserstack')
+  .description('Run AppWright test on Android BrowserStack')
+  .requiredOption('--org-id <orgId>', 'Organization ID')
+  .requiredOption('--app-version-id <appVersionId>', 'App Version ID')
+  .requiredOption('--test <testPath>', 'Path to test file')
+  .option('--priority <priority>', 'Job priority (low, medium, high)', 'medium')
+  .option('--wait', 'Wait for job completion')
+  .option('--timeout <seconds>', 'Timeout for waiting (seconds)', '600')
+  .action(async (options) => {
+    const jobOptions = {
+      ...options,
+      target: 'browserstack',
+      platform: 'android',
+      appwrightProject: 'android-browserstack'
+    };
+    
+    logger.info('🤖 Running AppWright test on Android BrowserStack...');
+    const jobId = await submitJob(jobOptions);
+    
+    if (options.wait) {
+      await waitForCompletion(jobId, parseInt(options.timeout));
+    }
+  });
+
+program
+  .command('test:ios-browserstack')
+  .description('Run AppWright test on iOS BrowserStack')
+  .requiredOption('--org-id <orgId>', 'Organization ID')
+  .requiredOption('--app-version-id <appVersionId>', 'App Version ID')
+  .requiredOption('--test <testPath>', 'Path to test file')
+  .option('--priority <priority>', 'Job priority (low, medium, high)', 'medium')
+  .option('--wait', 'Wait for job completion')
+  .option('--timeout <seconds>', 'Timeout for waiting (seconds)', '600')
+  .action(async (options) => {
+    const jobOptions = {
+      ...options,
+      target: 'browserstack',
+      platform: 'ios',
+      appwrightProject: 'ios-browserstack'
+    };
+    
+    logger.info('📱 Running AppWright test on iOS BrowserStack...');
+    const jobId = await submitJob(jobOptions);
+    
+    if (options.wait) {
+      await waitForCompletion(jobId, parseInt(options.timeout));
+    }
+  });
+
+program
+  .command('test:android-emulator')
+  .description('Run AppWright test on Android Emulator')
+  .requiredOption('--org-id <orgId>', 'Organization ID')
+  .requiredOption('--app-version-id <appVersionId>', 'App Version ID')
+  .requiredOption('--test <testPath>', 'Path to test file')
+  .option('--priority <priority>', 'Job priority (low, medium, high)', 'medium')
+  .option('--wait', 'Wait for job completion')
+  .option('--timeout <seconds>', 'Timeout for waiting (seconds)', '300')
+  .action(async (options) => {
+    const jobOptions = {
+      ...options,
+      target: 'emulator',
+      platform: 'android',
+      appwrightProject: 'android-emulator'
+    };
+    
+    logger.info('🔧 Running AppWright test on Android Emulator...');
+    const jobId = await submitJob(jobOptions);
+    
+    if (options.wait) {
+      await waitForCompletion(jobId, parseInt(options.timeout));
+    }
   });
 
 // Parse command line arguments

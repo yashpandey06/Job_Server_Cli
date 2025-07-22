@@ -79,20 +79,35 @@ class BrowserStackExecutor {
       let testArgs;
       let workingDir;
 
+      // Check if this is an AppWright test
+      const isAppWrightTest = await this.isAppWrightTest(job.test_path);
+      
       if (job.target === 'browserstack') {
-        // Use the actual BrowserStack setup from node-appium-app-browserstack-master
-        workingDir = path.join(process.cwd(), 'node-appium-app-browserstack-master', 'android');
-        testCommand = 'npm';
-        testArgs = ['run', 'test'];
-        
-        logger.info(`📁 Working directory: ${workingDir}`);
-        logger.info(`🔧 Using BrowserStack configuration from: ${path.join(workingDir, 'browserstack.yml')}`);
+        if (isAppWrightTest) {
+          // Run AppWright test on BrowserStack
+          logger.info(`🧪 Executing AppWright test: ${job.test_path}`);
+          return await this.executeAppWrightTest(job, agent, env, buildNumber, sessionName, startTime);
+        } else {
+          // Use the legacy BrowserStack setup from node-appium-app-browserstack-master
+          workingDir = path.join(process.cwd(), 'node-appium-app-browserstack-master', 'android');
+          testCommand = 'npm';
+          testArgs = ['run', 'test'];
+          
+          logger.info(`📁 Working directory: ${workingDir}`);
+          logger.info(`🔧 Using BrowserStack configuration from: ${path.join(workingDir, 'browserstack.yml')}`);
+        }
         
       } else if (job.target === 'emulator') {
-        // Run locally with emulator (simplified for demo)
-        workingDir = process.cwd();
-        testCommand = 'npm';
-        testArgs = ['run', 'test:mobile', '--', '--grep', path.basename(job.test_path, '.spec.js')];
+        if (isAppWrightTest) {
+          // Run AppWright test on emulator
+          logger.info(`🧪 Executing AppWright test on emulator: ${job.test_path}`);
+          return await this.executeAppWrightTest(job, agent, env, buildNumber, sessionName, startTime);
+        } else {
+          // Run legacy test locally with emulator (simplified for demo)
+          workingDir = process.cwd();
+          testCommand = 'npm';
+          testArgs = ['run', 'test:mobile', '--', '--grep', path.basename(job.test_path, '.spec.js')];
+        }
       } else {
         throw new Error(`Unsupported target: ${job.target}`);
       }
@@ -156,6 +171,279 @@ class BrowserStackExecutor {
         }
       };
     }
+  }
+
+  /**
+   * Check if the test file is an AppWright test
+   */
+  async isAppWrightTest(testPath) {
+    try {
+      const fs = require('fs').promises;
+      const content = await fs.readFile(testPath, 'utf8');
+      
+      // Check if the test file imports from "appwright"
+      return content.includes('from "appwright"') || content.includes("from 'appwright'");
+    } catch (error) {
+      logger.warn(`Could not check test type for ${testPath}: ${error.message}`);
+      return false;
+    }
+  }
+
+  /**
+   * Execute AppWright test
+   */
+  async executeAppWrightTest(job, agent, env, buildNumber, sessionName, startTime) {
+    logger.info(`🎯 Executing AppWright test: ${job.test_path}`);
+    logger.info(`🚀 AppWright Project: ${job.appwright_project || 'default'}`);
+    
+    try {
+      // For AppWright tests, we need to use the appwright.config.ts configuration
+      const workingDir = process.cwd();
+      const configPath = path.join(workingDir, 'appwright.config.ts');
+      
+      // Check if AppWright config exists
+      const fs = require('fs');
+      if (!fs.existsSync(configPath)) {
+        throw new Error('AppWright config file not found. Please ensure appwright.config.ts exists.');
+      }
+
+      let testCommand, testArgs;
+      let projectName = job.appwright_project;
+      
+      // Auto-detect project based on target if not specified
+      if (!projectName) {
+        if (job.target === 'browserstack') {
+          projectName = 'android-browserstack'; // default to android
+        } else if (job.target === 'emulator') {
+          projectName = 'android-emulator'; // default to android
+        }
+      }
+      
+      if (job.target === 'browserstack') {
+        // Run AppWright test on BrowserStack using the specified project
+        testCommand = 'npx';
+        testArgs = ['appwright', 'test'];
+        
+        if (projectName) {
+          testArgs.push('--project');
+          testArgs.push(projectName);
+        }
+        
+        // For AppWright, we run all tests in the project since it handles test discovery
+        // If specific test filtering is needed, use grep pattern
+        if (job.test_path && job.test_path !== '*' && job.test_path.includes('.spec.js')) {
+          // Extract test name pattern for filtering
+          const testFileName = job.test_path.split('/').pop().replace('.spec.js', '');
+          testArgs.push('--grep');
+          testArgs.push(testFileName);
+        }
+        
+        // Set BrowserStack specific environment variables
+        env.BROWSERSTACK_USERNAME = env.BROWSERSTACK_USERNAME || process.env.BROWSERSTACK_USERNAME;
+        env.BROWSERSTACK_ACCESS_KEY = env.BROWSERSTACK_ACCESS_KEY || process.env.BROWSERSTACK_ACCESS_KEY;
+        env.BROWSERSTACK_BUILD = `AppWright Mobile Build #${buildNumber}`;
+        env.BROWSERSTACK_SESSION = sessionName;
+        
+        logger.info(`🌐 Running AppWright test on BrowserStack`);
+        logger.info(`🔧 Build: ${env.BROWSERSTACK_BUILD}`);
+        logger.info(`🎯 Project: ${projectName}`);
+        
+      } else if (job.target === 'emulator') {
+        // Run AppWright test on local emulator
+        testCommand = 'npx';
+        testArgs = ['appwright', 'test'];
+        
+        if (projectName) {
+          testArgs.push('--project');
+          testArgs.push(projectName);
+        }
+        
+        // For AppWright, we run all tests in the project since it handles test discovery
+        // If specific test filtering is needed, use grep pattern
+        if (job.test_path && job.test_path !== '*' && job.test_path.includes('.spec.js')) {
+          // Extract test name pattern for filtering
+          const testFileName = job.test_path.split('/').pop().replace('.spec.js', '');
+          testArgs.push('--grep');
+          testArgs.push(testFileName);
+        }
+        
+        logger.info(`📱 Running AppWright test on local emulator`);
+        logger.info(`🎯 Project: ${projectName}`);
+      }
+      
+      logger.info(`📋 Command: ${testCommand} ${testArgs.join(' ')}`);
+      logger.info(`📍 Working Dir: ${workingDir}`);
+
+      // Execute the AppWright test
+      const result = await this.runAppWrightTestCommand(testCommand, testArgs, env, workingDir);
+      const duration = Date.now() - startTime;
+
+      logger.info(`✅ AppWright test execution completed in ${duration}ms`);
+
+      return {
+        status: result.exitCode === 0 ? 'passed' : 'failed',
+        test_results: {
+          total: result.testStats?.total || 1,
+          passed: result.testStats?.passed || (result.exitCode === 0 ? 1 : 0),
+          failed: result.testStats?.failed || (result.exitCode === 0 ? 0 : 1),
+          duration: duration,
+          output: result.output,
+          exitCode: result.exitCode,
+          framework: 'AppWright',
+          project: projectName
+        },
+        browserstack_session: result.browserstackSession,
+        build_info: {
+          build_number: buildNumber,
+          build_name: `AppWright Mobile Build #${buildNumber}`,
+          session_name: sessionName,
+          dashboard_url: job.target === 'browserstack' 
+            ? `https://app-automate.browserstack.com/dashboard/v2/builds`
+            : null
+        },
+        execution_details: {
+          command: `${testCommand} ${testArgs.join(' ')}`,
+          working_directory: workingDir,
+          target: job.target,
+          agent_id: agent.id,
+          framework: 'AppWright',
+          project: projectName,
+          started_at: new Date(startTime).toISOString(),
+          completed_at: new Date().toISOString()
+        }
+      };
+
+    } catch (error) {
+      const duration = Date.now() - startTime;
+      logger.error(`❌ AppWright test execution failed: ${error.message}`);
+
+      return {
+        status: 'failed',
+        error: error.message,
+        test_results: {
+          total: 1,
+          passed: 0,
+          failed: 1,
+          duration: duration,
+          output: error.output || error.message,
+          framework: 'AppWright',
+          project: projectName || 'unknown'
+        },
+        execution_details: {
+          target: job.target,
+          agent_id: agent.id,
+          framework: 'AppWright',
+          project: projectName || 'unknown',
+          started_at: new Date(startTime).toISOString(),
+          failed_at: new Date().toISOString(),
+          error: error.message
+        }
+      };
+    }
+  }
+
+  /**
+   * Run AppWright test command and capture output
+   */
+  async runAppWrightTestCommand(command, args, env, workingDir = process.cwd()) {
+    return new Promise((resolve, reject) => {
+      logger.info(`🏃 Executing AppWright: ${command} ${args.join(' ')}`);
+      logger.info(`📍 Working directory: ${workingDir}`);
+
+      const child = spawn(command, args, {
+        env,
+        stdio: 'pipe',
+        shell: true,
+        cwd: workingDir
+      });
+
+      let stdout = '';
+      let stderr = '';
+
+      child.stdout.on('data', (data) => {
+        const output = data.toString();
+        stdout += output;
+        logger.info(`🧪 AppWright Output: ${output.trim()}`);
+      });
+
+      child.stderr.on('data', (data) => {
+        const output = data.toString();
+        stderr += output;
+        logger.warn(`⚠️  AppWright Warning: ${output.trim()}`);
+      });
+
+      child.on('close', (exitCode) => {
+        logger.info(`🏁 AppWright process exited with code: ${exitCode}`);
+
+        // Parse AppWright test statistics from output
+        const testStats = this.parseAppWrightTestStats(stdout + stderr);
+
+        // Extract BrowserStack session info if available
+        const browserstackSession = this.extractBrowserStackSession(stdout + stderr);
+
+        resolve({
+          exitCode,
+          output: stdout + stderr,
+          testStats,
+          browserstackSession
+        });
+      });
+
+      child.on('error', (error) => {
+        logger.error(`💥 AppWright process error: ${error.message}`);
+        reject(error);
+      });
+
+      // Set timeout for AppWright test execution (15 minutes for BrowserStack tests)
+      setTimeout(() => {
+        child.kill('SIGTERM');
+        reject(new Error('AppWright test execution timed out after 15 minutes'));
+      }, 15 * 60 * 1000);
+    });
+  }
+
+  /**
+   * Parse AppWright test statistics from output
+   */
+  parseAppWrightTestStats(output) {
+    const stats = {
+      total: 0,
+      passed: 0,
+      failed: 0
+    };
+
+    // AppWright test result patterns
+    const patterns = [
+      /(\d+) passed/i,
+      /(\d+) failed/i,
+      /(\d+) tests? ran/i,
+      /Results:\s*(\d+) passed,\s*(\d+) failed/i
+    ];
+
+    const passedMatch = output.match(/(\d+) passed/i);
+    const failedMatch = output.match(/(\d+) failed/i);
+    const totalMatch = output.match(/(\d+) tests? ran/i);
+
+    if (passedMatch) {
+      stats.passed = parseInt(passedMatch[1]);
+    }
+
+    if (failedMatch) {
+      stats.failed = parseInt(failedMatch[1]);
+    }
+
+    if (totalMatch) {
+      stats.total = parseInt(totalMatch[1]);
+    } else {
+      stats.total = stats.passed + stats.failed;
+    }
+
+    // If no stats found, default to 1 test
+    if (stats.total === 0) {
+      stats.total = 1;
+    }
+
+    return stats;
   }
 
   /**

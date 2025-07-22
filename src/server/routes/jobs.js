@@ -19,6 +19,8 @@ const jobSchema = Joi.object({
   test_path: Joi.string().required(),
   priority: Joi.string().valid('low', 'medium', 'high').default('medium'),
   target: Joi.string().valid('emulator', 'device', 'browserstack').default('emulator'),
+  test_framework: Joi.string().valid('appwright', 'legacy').default('legacy'),
+  appwright_project: Joi.string().optional(),
   id: Joi.string().optional(),
   created_at: Joi.date().optional(),
   status: Joi.string().optional()
